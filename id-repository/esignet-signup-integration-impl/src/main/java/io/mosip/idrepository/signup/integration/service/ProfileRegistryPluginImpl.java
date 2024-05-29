@@ -2,10 +2,12 @@ package io.mosip.idrepository.signup.integration.service;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.node.TextNode;
 import io.micrometer.core.annotation.Timed;
 import io.mosip.idrepository.signup.integration.dto.*;
+import io.mosip.idrepository.signup.integration.util.ErrorConstants;
 import io.mosip.idrepository.signup.integration.util.ProfileCacheService;
 import io.mosip.kernel.core.util.HMACUtils2;
 import io.mosip.signup.api.dto.ProfileDto;
@@ -99,8 +101,33 @@ public class ProfileRegistryPluginImpl implements ProfileRegistryPlugin {
     @Autowired
     private ProfileCacheService profileCacheService;
 
+    @Value("#{${mosip.signup.supported-languages}}")
+    private List<String> supportedLanguages;
+
+    @Value("${mosip.signup.password.max-length}")
+    private int maxLength;
+
+    @Value("${mosip.signup.password.min-length}")
+    private int minLength;
+
+    @Value("${mosip.signup.password.pattern}")
+    private String pattern;
+
+    @Value("${mosip.signup.identifier.regex}")
+    private String identifierRegex;
+
+    @Value("${mosip.signup.fullname.pattern}")
+    private String fullNameRegex;
+
+    @Value("${mosip.signup.default-language}")
+    private String defaultLanguage;
+
     @Override
     public void validate(String action, ProfileDto profileDto) throws InvalidProfileException {
+        if (!action.equals("CREATE") && !action.equals("UPDATE")) {
+            throw new InvalidProfileException(ErrorConstants.INVALID_ACTION);
+        }
+
         JsonNode inputJson = profileDto.getIdentity();
         double version = inputJson.has(ID_SCHEMA_VERSION_FIELD_ID) ? inputJson.get(ID_SCHEMA_VERSION_FIELD_ID).asDouble() : 0;
         SchemaResponse schemaResponse = getSchemaJson(version);
@@ -116,11 +143,48 @@ public class ProfileRegistryPluginImpl implements ProfileRegistryPlugin {
         while (itr.hasNext()) {
             Map.Entry<String, JsonNode> entry = itr.next();
             log.info("TODO - Need to validate field {} >> {}", entry.getKey(), entry.getValue());
-        }
+            switch (entry.getKey()) {
+                case "preferredLang": {
+                    if (!supportedLanguages.contains(entry.getValue().textValue())) {
+                        throw new InvalidProfileException(ErrorConstants.UNSUPPORTED_LANGUAGE);
+                    }
+                    break;
+                }
+                case "password": {
+                    String value = entry.getValue().textValue();
 
-        //validate input data with the configured regexes in the schema
-        //validate datatype
-        //validate allowed language
+                    if(value == null || value.isBlank())
+                        throw new InvalidProfileException(ErrorConstants.INVALID_PASSWORD);
+                    if(value.length() < minLength || value.length() > maxLength)
+                        throw new InvalidProfileException(ErrorConstants.INVALID_PASSWORD);
+                    if (!value.matches(pattern))
+                        throw new InvalidProfileException(ErrorConstants.INVALID_PASSWORD);
+                    break;
+                }
+                case "phone": {
+                    String value = entry.getValue().textValue();
+                    if(value == null || value.isBlank())
+                        throw new InvalidProfileException(ErrorConstants.INVALID_IDENTIFIER);
+                    if (!value.matches(identifierRegex))
+                        throw new InvalidProfileException(ErrorConstants.INVALID_IDENTIFIER);
+                    break;
+                }
+                case "fullName": {
+                    ArrayNode val = (ArrayNode) entry.getValue();
+                    List<String> languages = val.findValuesAsText("language");
+                    List<String> value = val.findValuesAsText("value");
+                    if (!languages.isEmpty() && !value.isEmpty()) {
+                        String language = languages.get(0);
+                        String fullName = value.get(0);
+                        if (language.equals(defaultLanguage) && !fullName.matches(fullNameRegex)) {
+                            throw new InvalidProfileException(ErrorConstants.INVALID_FULLNAME);
+                        }
+                    }
+                    break;
+                }
+            }
+
+        }
     }
 
     @Override
