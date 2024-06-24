@@ -1,5 +1,6 @@
 package io.mosip.idrepository.signup.integration.service;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -143,47 +144,31 @@ public class ProfileRegistryPluginImpl implements ProfileRegistryPlugin {
         while (itr.hasNext()) {
             Map.Entry<String, JsonNode> entry = itr.next();
             log.info("TODO - Need to validate field {} >> {}", entry.getKey(), entry.getValue());
-            switch (entry.getKey()) {
-                case "preferredLang": {
-                    if (!supportedLanguages.contains(entry.getValue().textValue())) {
-                        throw new InvalidProfileException(ErrorConstants.UNSUPPORTED_LANGUAGE);
-                    }
-                    break;
-                }
-                case "password": {
-                    String value = entry.getValue().textValue();
-
-                    if(value == null || value.isBlank())
-                        throw new InvalidProfileException(ErrorConstants.INVALID_PASSWORD);
-                    if(value.length() < minLength || value.length() > maxLength)
-                        throw new InvalidProfileException(ErrorConstants.INVALID_PASSWORD);
-                    if (!value.matches(pattern))
-                        throw new InvalidProfileException(ErrorConstants.INVALID_PASSWORD);
-                    break;
-                }
-                case "phone": {
-                    String value = entry.getValue().textValue();
-                    if(value == null || value.isBlank())
-                        throw new InvalidProfileException(ErrorConstants.INVALID_IDENTIFIER);
-                    if (!value.matches(identifierRegex))
-                        throw new InvalidProfileException(ErrorConstants.INVALID_IDENTIFIER);
-                    break;
-                }
-                case "fullName": {
-                    ArrayNode val = (ArrayNode) entry.getValue();
-                    List<String> languages = val.findValuesAsText("language");
-                    List<String> value = val.findValuesAsText("value");
-                    if (!languages.isEmpty() && !value.isEmpty()) {
-                        String language = languages.get(0);
-                        String fullName = value.get(0);
-                        if (language.equals(defaultLanguage) && !fullName.matches(fullNameRegex)) {
-                            throw new InvalidProfileException(ErrorConstants.INVALID_FULLNAME);
+            JsonNode validateField = fields.get(entry.getKey());
+            if (validateField != null) {
+                JsonNode validators = validateField.get("validators");
+                if (validators != null) {
+                    JsonNode validator = validators.get(0);
+                    if (entry.getValue().getClass().equals(TextNode.class)) {
+                        String value = entry.getValue().textValue();
+                        if (!value.matches(validator.get("validator").textValue())) {
+                            throw new InvalidProfileException(ErrorConstants.INVALID_INPUT);
                         }
+                    } else if (entry.getValue().getClass().equals(ArrayNode.class)) {
+                        for (JsonNode valueNode: entry.getValue()) {
+                            JsonNode language = valueNode.get("language");
+                            JsonNode langCode = validator.get("langCode");
+                            if (language != null && langCode != null && langCode.textValue().equals(langCode.textValue())) {
+                                String value = valueNode.get("value").textValue();
+                                if (!value.matches(validator.get("validator").textValue())) {
+                                    throw new InvalidProfileException(ErrorConstants.INVALID_INPUT);
+                                }
+                            }
+                        }
+
                     }
-                    break;
                 }
             }
-
         }
     }
 
@@ -299,10 +284,14 @@ public class ProfileRegistryPluginImpl implements ProfileRegistryPlugin {
                 HttpMethod.GET, null, new ParameterizedTypeReference<ResponseWrapper<SchemaResponse>>() {});
         if (responseWrapper.getResponse().getSchemaJson()!=null) {
             SchemaResponse schemaResponse = new SchemaResponse();
-            schemaResponse.setParsedSchemaJson(objectMapper.valueToTree(responseWrapper.getResponse().getSchemaJson()));
-            schemaResponse.setIdVersion(responseWrapper.getResponse().getIdVersion());
-            schemaMap.put(version, schemaResponse);
-            return schemaMap.get(version);
+            try {
+                schemaResponse.setParsedSchemaJson(objectMapper.readValue(responseWrapper.getResponse().getSchemaJson(), JsonNode.class));
+                schemaResponse.setIdVersion(responseWrapper.getResponse().getIdVersion());
+                schemaMap.put(version, schemaResponse);
+                return schemaMap.get(version);
+            } catch (JsonProcessingException e) {
+                log.error("Failed to parse schemaResponse", e);
+            }
         }
         log.error("Failed to fetch the latest schema json due to {}", responseWrapper);
         throw new ProfileException(REQUEST_FAILED);
