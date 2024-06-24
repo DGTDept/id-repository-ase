@@ -1,5 +1,6 @@
 package io.mosip.idrepository.signup.integration.service;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -48,6 +49,7 @@ public class ProfileRegistryPluginImpl implements ProfileRegistryPlugin {
     private static final String SELECTED_HANDLES_FIELD_ID = "selectedHandles";
     private static final String UTC_DATETIME_PATTERN = "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'";
     private final Map<Double, SchemaResponse> schemaMap = new HashMap<>();
+    private static final List<String> ACTIONS = Arrays.asList("CREATE", "UPDATE");
 
     @Value("#{'${mosip.signup.idrepo.default.selected-handles:phone}'.split(',')}")
     private List<String> defaultSelectedHandles;
@@ -101,30 +103,47 @@ public class ProfileRegistryPluginImpl implements ProfileRegistryPlugin {
     @Autowired
     private ProfileCacheService profileCacheService;
 
-    @Value("#{${mosip.signup.supported-languages}}")
-    private List<String> supportedLanguages;
+    private void checkRegexValidator(JsonNode validator, JsonNode valueNode) {
+        String value = valueNode.get("value").textValue();
+        if (validator.get("type").textValue().equals("regex") &&
+                !value.matches(validator.get("validator").textValue())) {
+            log.error("Regex of {} does not match value of {}", validator.get("validator").textValue(), value);
+            throw new InvalidProfileException(ErrorConstants.INVALID_INPUT);
+        }
+    }
 
-    @Value("${mosip.signup.password.max-length}")
-    private int maxLength;
+    private void validateEntryFields(Iterator<Map.Entry<String, JsonNode>> itr, JsonNode fields) {
+        while (itr.hasNext()) {
+            Map.Entry<String, JsonNode> entry = itr.next();
+            log.info("TODO - Need to validate field {} >> {}", entry.getKey(), entry.getValue());
+            JsonNode validateField = fields.get(entry.getKey());
 
-    @Value("${mosip.signup.password.min-length}")
-    private int minLength;
+            if (validateField == null) {
+                log.error("Null value found in key field {}", entry.getKey());
+                throw new InvalidProfileException(ErrorConstants.INVALID_INPUT);
+            }
 
-    @Value("${mosip.signup.password.pattern}")
-    private String pattern;
+            JsonNode validators = validateField.get("validators");
+            if (validators == null) continue;
 
-    @Value("${mosip.signup.identifier.regex}")
-    private String identifierRegex;
-
-    @Value("${mosip.signup.fullname.pattern}")
-    private String fullNameRegex;
-
-    @Value("${mosip.signup.default-language}")
-    private String defaultLanguage;
+            JsonNode validator = validators.get(0);
+            if (entry.getValue().getClass().equals(TextNode.class)) {
+                checkRegexValidator(validator, entry.getValue());
+            } else if (entry.getValue().getClass().equals(ArrayNode.class)) {
+                for (JsonNode valueNode: entry.getValue()) {
+                    JsonNode language = valueNode.get("language");
+                    JsonNode langCode = validator.get("langCode");
+                    if ((language == null) || (langCode != null && language.textValue().equals(langCode.textValue()))) {
+                        checkRegexValidator(validator, valueNode);
+                    }
+                }
+            }
+        }
+    }
 
     @Override
     public void validate(String action, ProfileDto profileDto) throws InvalidProfileException {
-        if (!action.equals("CREATE") && !action.equals("UPDATE")) {
+        if (!ACTIONS.contains(action)) {
             throw new InvalidProfileException(ErrorConstants.INVALID_ACTION);
         }
 
@@ -133,58 +152,21 @@ public class ProfileRegistryPluginImpl implements ProfileRegistryPlugin {
         SchemaResponse schemaResponse = getSchemaJson(version);
         ((ObjectNode) inputJson).set(ID_SCHEMA_VERSION_FIELD_ID, objectMapper.valueToTree(schemaResponse.getIdVersion()));
 
+        // check if any required field is missing during the "create" action.
         JsonNode requiredFieldIds = schemaResponse.getParsedSchemaJson().at("/properties/identity/required");
-        JsonNode fields = schemaResponse.getParsedSchemaJson().at("/properties/identity/properties");
-
-        log.info("TODO - Need to validate required fields >> {}", requiredFieldIds);
-        log.info("TODO - Need to validate fields >> {}", fields);
-
-        Iterator<Map.Entry<String, JsonNode>> itr = inputJson.fields();
-        while (itr.hasNext()) {
-            Map.Entry<String, JsonNode> entry = itr.next();
-            log.info("TODO - Need to validate field {} >> {}", entry.getKey(), entry.getValue());
-            switch (entry.getKey()) {
-                case "preferredLang": {
-                    if (!supportedLanguages.contains(entry.getValue().textValue())) {
-                        throw new InvalidProfileException(ErrorConstants.UNSUPPORTED_LANGUAGE);
-                    }
-                    break;
-                }
-                case "password": {
-                    String value = entry.getValue().textValue();
-
-                    if(value == null || value.isBlank())
-                        throw new InvalidProfileException(ErrorConstants.INVALID_PASSWORD);
-                    if(value.length() < minLength || value.length() > maxLength)
-                        throw new InvalidProfileException(ErrorConstants.INVALID_PASSWORD);
-                    if (!value.matches(pattern))
-                        throw new InvalidProfileException(ErrorConstants.INVALID_PASSWORD);
-                    break;
-                }
-                case "phone": {
-                    String value = entry.getValue().textValue();
-                    if(value == null || value.isBlank())
-                        throw new InvalidProfileException(ErrorConstants.INVALID_IDENTIFIER);
-                    if (!value.matches(identifierRegex))
-                        throw new InvalidProfileException(ErrorConstants.INVALID_IDENTIFIER);
-                    break;
-                }
-                case "fullName": {
-                    ArrayNode val = (ArrayNode) entry.getValue();
-                    List<String> languages = val.findValuesAsText("language");
-                    List<String> value = val.findValuesAsText("value");
-                    if (!languages.isEmpty() && !value.isEmpty()) {
-                        String language = languages.get(0);
-                        String fullName = value.get(0);
-                        if (language.equals(defaultLanguage) && !fullName.matches(fullNameRegex)) {
-                            throw new InvalidProfileException(ErrorConstants.INVALID_FULLNAME);
-                        }
-                    }
-                    break;
+        if (action.equals("CREATE")) {
+            for (JsonNode requiredFieldId : requiredFieldIds) {
+                if (inputJson.get(requiredFieldId.textValue()) == null) {
+                    log.error("Null value found in the required field of {}", requiredFieldId);
+                    throw new InvalidProfileException(ErrorConstants.INVALID_INPUT);
                 }
             }
-
         }
+
+        // validate each entry field with schemaResponse
+        Iterator<Map.Entry<String, JsonNode>> itr = inputJson.fields();
+        JsonNode fields = schemaResponse.getParsedSchemaJson().at("/properties/identity/properties");
+        validateEntryFields(itr, fields);
     }
 
     @Override
@@ -299,10 +281,14 @@ public class ProfileRegistryPluginImpl implements ProfileRegistryPlugin {
                 HttpMethod.GET, null, new ParameterizedTypeReference<ResponseWrapper<SchemaResponse>>() {});
         if (responseWrapper.getResponse().getSchemaJson()!=null) {
             SchemaResponse schemaResponse = new SchemaResponse();
-            schemaResponse.setParsedSchemaJson(objectMapper.valueToTree(responseWrapper.getResponse().getSchemaJson()));
-            schemaResponse.setIdVersion(responseWrapper.getResponse().getIdVersion());
-            schemaMap.put(version, schemaResponse);
-            return schemaMap.get(version);
+            try {
+                schemaResponse.setParsedSchemaJson(objectMapper.readValue(responseWrapper.getResponse().getSchemaJson(), JsonNode.class));
+                schemaResponse.setIdVersion(responseWrapper.getResponse().getIdVersion());
+                schemaMap.put(version, schemaResponse);
+                return schemaMap.get(version);
+            } catch (JsonProcessingException e) {
+                log.error("Failed to parse schemaResponse", e);
+            }
         }
         log.error("Failed to fetch the latest schema json due to {}", responseWrapper);
         throw new ProfileException(REQUEST_FAILED);
